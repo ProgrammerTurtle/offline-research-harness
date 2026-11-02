@@ -37,6 +37,11 @@ Native `tools list` probes also verify local/remote MCP startup rejection with
 positive controls. The listing still includes built-ins under disable settings
 and succeeds against HTTP 401 fixtures, so it proves neither builtin execution
 suppression nor authentication. See AMP.md for the remaining live-execution gates.
+Native execute-startup tests against local mocks also verify MCP rejection, but
+show that tool-disable settings do not prevent local plugin initialization or
+access to its own service's synthetic credential. Successful agent turns, builtin
+execution restrictions, hooks, subagents and continuation remain unverified;
+credential-bearing model execution stays disabled.
 
 ```sh
 python -m unittest discover -s tests -p test_harness.py -v

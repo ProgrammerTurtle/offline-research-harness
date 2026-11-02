@@ -11,8 +11,9 @@ archived CLI conversation record; it is not a threadless raw-inference API.
 The [official CLI documentation](https://ampcode.com/docs/cli) and pinned local
 `amp --help` identify `-x`, `--stream-json`, `--stream-json-input`,
 `--settings-file`, `--no-ide`, `--mode` and `--features`. The candidate command
-and requested settings live in `synthetic_harness/amp_execute.py`. They are
-recorded, **not executed**. The candidate settings now use the documented
+and requested settings live in `synthetic_harness/amp_execute.py`. The adapter
+records but does not execute them; separate native startup tests use local mocks
+only, as described below. The candidate settings use the documented
 `amp.tools.disable: ["*"]`, reject-all permissions, no MCP servers, and both
 local-command and remote-URL MCP rejection rules. These are requested
 restrictions, not independently verified enforcement for authenticated execute
@@ -36,7 +37,8 @@ empty tools/MCP/subagents, `/tmp` cwd, the exact current user-message echo,
 one text-only `end_turn` assistant proposal, and a matching successful result.
 Only after EOF and exit zero does the host release the action. A future native
 implementation must continue the explicit episode thread ID, never the latest
-thread. Native continuation is not yet implemented or tested.
+thread. Successful native continuation is not yet implemented or established;
+the native startup tests exercise only its rejected-fetch path.
 
 Unknown fields, tools, approvals, subagents, thinking blocks, foreign sessions,
 stale echoes, duplicate/out-of-order events, partial output, malformed or duplicate-key
@@ -69,7 +71,8 @@ fixtures now distinguish authentication discovery, rejected account requests,
 and stalled transport; see Native tool discovery below. Native execution remains
 blocked: a tool listing is not evidence of effective execution restrictions.
 
-Validation: `python -m unittest discover -s tests -v` passed 111 tests;
+Validation: `python -m unittest discover -s tests -v` passed 112 tests,
+including the eleven-case native execution startup matrix;
 `python -m synthetic_harness validate` passed 2,160 seeded controls with zero
 failures. Targeted adapter tests cover six completion/escalation episodes across
 the three domains, stale echoes and session changes, nonzero exits after a valid
@@ -297,10 +300,56 @@ public endpoint. Native stdout is inspected only in the synthetic test; raw
 registry/error output is not added to the protected audit journal. Telemetry
 ordering/count is not a protocol contract and is not used as an assertion.
 
-The next gate is evidence for native builtin execution and plugin/hook restrictions
-using local mocks. Keep credential-bearing model execution disabled until those
-controls and native session continuation are established; do not use a successful
-`tools list` as permission to enable `-x`.
+## Native execution startup against local mocks
+
+`tests/test_amp_native_execution.py` adds eleven cases using the same pinned
+binary, namespace, cgroup, synthetic-only key and loopback TLS routing. Unlike
+discovery tests, these invoke native `-x` startup, explicit-thread continuation
+and the documented `plugins exec` operation. All real destinations are blocked.
+Only the fixture's minimal `getUserInfo` response succeeds; thread creation,
+thread fetch and remote plugin/skill loads return 404. This is not a complete
+backend implementation or a successful agent turn. Production source and its
+command allowlist are unchanged; credential-bearing execute remains disabled.
+
+| Case | Verified observation and limit |
+| --- | --- |
+| Account request rejected | Execute exits before local plugin initialization. A failure this early proves nothing about tool restrictions. |
+| Minimal synthetic account accepted | Execute initializes a local plugin despite wildcard tool disable and reject-all tool permissions. Removing the plugin file removes its markers. |
+| Plugin ready timeout zero | Local plugin still initializes; zero is not an extension-disabling switch. |
+| Synthetic service-key canary | Plugin initialization can read the known fake key mounted in its own trusted-service namespace. Host workspace path remains absent. This is a shared trust-boundary observation, not a real credential disclosure or an Amp vulnerability claim. |
+| Local MCP reject/allow pair during execute startup | Command-reject rule prevents the harmless process marker; removing only MCP rejection starts it. |
+| Remote MCP reject/allow pair during execute startup | URL-reject rule prevents fixture MCP requests; removing only MCP rejection produces them. |
+| Explicit-thread continuation | Local plugin initializes, then thread-tail fetch is rejected. No successful session continuity established. |
+| `plugins exec` for `agent.start` and `tool.call` | Module initialization and registration occur and CLI exits zero, but callback markers are absent. Hook delivery and preventive enforcement remain inconclusive. |
+
+The fixture observed four thread-create requests in a single execute invocation,
+despite zero supervisor retries. This demonstrates native startup retries, not
+a fixed retry contract or measured model-provider retries. Request counts are
+reported, not asserted as invariant. No builtin or subagent tool execution was
+reached. Empty callback markers do not establish suppression. Remote extension
+loads were rejected, so successful remote plugins, connectors and subagents
+remain untested. The local plugin interface is documented in
+[the plugin API](https://ampcode.com/docs/plugin-api); local extension code must
+be trusted independently of model tool permissions.
+
+Each case checks the bounded result, completion within 14 seconds, synthetic
+key/body exclusion from journals, external-anchor verification, relay closure
+and service-cgroup cleanup. Test-only boolean markers never enter authoritative
+journals. Native stdout/stderr remain discarded. Run after preparing the pinned
+runtime and enrolling the launching shell as documented in SANDBOX.md:
+
+```sh
+python -m unittest discover -s tests -p test_amp_native_execution.py -v
+```
+
+**Remaining blocker:** the local fixture does not establish a connected native
+agent session, so execution-time builtin permissions, successful hook dispatch,
+subagent suppression and successful continuation cannot yet be verified. Do not
+treat post-output schema rejection as a preventive control for tool side effects.
+Before credential-bearing execution, require a supported extension-free native
+profile and connected offline test surface, or a stronger separation that keeps
+native extension execution away from credentials. Do not enable live execution
+merely because MCP blocking or discovery works.
 
 ## Single-use read-only authentication check
 
