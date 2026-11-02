@@ -1,0 +1,21 @@
+# Local runtimes, generated evidence and caches are not source.
+.runtime/
+.amp/
+__pycache__/
+*.py[cod]
+.venv/
+*.log
+*.jsonl
+*.tar.gz
+
+# Never commit operator credentials or authentication evidence.
+.env
+.env.*
+auth.json
+credentials.json
+amp-key
+check-used
+protected-*/
+*.key
+*.pem
+!synthetic_harness/certs/mozilla-debian-20250419.pem
