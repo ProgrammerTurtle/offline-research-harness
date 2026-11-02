@@ -351,6 +351,72 @@ profile and connected offline test surface, or a stronger separation that keeps
 native extension execution away from credentials. Do not enable live execution
 merely because MCP blocking or discovery works.
 
+## Simpler trusted decision client: supported-profile investigation
+
+The minimal design remains Amp as a **trusted decision client**, not a task
+executor: the independent host sends only a public observation and accepts one
+bounded structured action proposal. The host validates the action, executes the
+synthetic operation, computes hidden ground truth, and writes externally anchored
+evidence. Amp gets no task filesystem, oracle, investigator artifacts, authoritative
+logs or callable task-action endpoint. Never evaluate its text as shell/code.
+Session continuity, output limits and fail-closed validation stay in the existing
+adapter; they do not prevent side effects inside Amp before output is received.
+
+Public documentation and the pinned native help were inspected on 2026-11-02.
+No login, stored credential access, account mutation, support contact, backend
+protocol reconstruction or live inference was used. Findings:
+
+* [Settings precedence](https://ampcode.com/docs/cli/settings): `--settings-file`
+  replaces the user settings location, not workspace settings. Workspace settings
+  override user settings; managed workspace settings can also merge/override them.
+  Empty private HOME/XDG directories and a fresh non-repository working directory
+  exclude inherited local files, not account-level configuration.
+* [Plugin sources](https://ampcode.com/docs/customize/plugins): project and system
+  directories are local; personal and workspace plugins apply across machines.
+  Plugin initialization runs code, independently of tool calls. Hooks are plugin
+  behavior, not a separate isolation layer. The docs explicitly say to trust loaded
+  plugins. No universal pre-initialization exclusion control was found in these
+  docs, the public settings schema or the pinned CLI help. This is a bounded search
+  result, not proof that no such feature exists anywhere.
+* Pinned help describes `--plugin-ready-timeout 0` as disabling the readiness wait;
+  the native canary tests above confirm it does not disable loading. `--mcp-config`
+  merges configuration. An empty MCP object is not an all-source exclusion switch.
+* [Remote MCP definitions](https://ampcode.com/docs/customize/mcp) live on Amp's
+  servers and can apply without local configuration. The docs explicitly state:
+  **"amp.tools.disable in local settings does not apply to remote MCP definitions."**
+  Local URL/command MCP rejection has native positive/negative evidence, but that
+  does not establish prevention of server-managed connectors. Restricting outbound
+  connections to ampcode.com cannot restrict what Amp's server can do on behalf of
+  an account. No account registry was inspected in this investigation.
+* Pinned help documents `amp.tools.enable` as an allowlist and `amp.tools.disable`
+  as a denylist, plus `amp.permissions`. Native `permissions test shell_command
+  --context thread --json` with the existing wildcard reject rule returned
+  `action: reject` and exit 2; subagent context did likewise. Changing only that
+  rule to allow returned `action: allow` and exit 0. These credential-free checks
+  ran inside the existing no-network runtime namespace. The command explicitly
+  tests rules **without running the tool**: policy evaluation is verified,
+  execution-time enforcement and disabling subagent creation are not.
+
+Two threats must remain distinct. Malicious installed extension code is part of
+the trusted client's process and can access its credentials; ordinary model tool
+permissions do not sandbox that code. Model-generated task actions, by contrast,
+remain untrusted data that only the host can apply. Treating Amp and every loaded
+extension as trusted simplifies the architecture but changes the threat model;
+it does not establish the requested extension-free startup guarantee. Unexpected
+extensions, skills, connectors, subagents or inherited instructions also confound
+an experiment even when they are not malicious. Results would characterize the
+configured Amp agent, not raw model inference.
+
+**Conclusion:** the host-only action design is viable as a contract, but a fully
+extension-free supported native profile has not been established. Keep live
+execution disabled. Do not expand the sandbox or emulate undocumented backend
+protocols to paper over this gap. The smallest next approval is a read-only
+inventory of personal/workspace plugins and remote-tool policies, without model
+calls or setting changes. That would identify the actual trusted components and
+whether a separately isolated account/workspace is needed; it would not itself
+prove per-invocation exclusion or authorize configuring one. No such inventory
+or account change has been performed.
+
 ## Single-use read-only authentication check
 
 The owner approved private operator-supplied Amp key provisioning and one real
