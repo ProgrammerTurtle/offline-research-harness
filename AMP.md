@@ -537,7 +537,47 @@ wire payloads and raw metadata; `verify` checks the external host anchor, not
 provider attestation. `egress_failed` identifies relay rejection, not an inferred
 TLS/provider cause. Other failures record the last reached stream stage.
 On a host-boundary failure, elapsed/output/event counters are the last received
-child snapshot, not a complete wall-time or remote-activity measurement.
+child snapshot, not a complete wall-time or remote-activity measurement. New
+outcomes additionally include host-owned `host_transport` counters: received
+envelopes (including the rejected 257th), consumed stdout wire bytes, opened
+tunnels, successful transfer exchanges, empty non-EOF polls, sent/received
+payload bytes and host probe elapsed milliseconds (excluding cleanup).
+These reveal local relay activity, not decrypted traffic or remote execution.
+Old anchored outcomes without these counters remain verifiable and unchanged.
+
+### Offline relay-budget diagnosis
+
+`tests/test_amp_boundary.py` exercises the unchanged production proxy and relay
+against a local socket pair, with synthetic credentials and external connections
+forbidden. An idle CONNECT tunnel exhausts the 256-envelope budget without any
+payload bytes: initial progress + tunnel open + 254 empty transfers are accepted;
+the next transfer is envelope 257 and is rejected before a receive log entry.
+In the targeted run this took 19.242 seconds and 20,471 stdout wire bytes, below
+the 30-second native deadline and 2-MiB wire cap. A seven-byte upstream control
+reached the same boundary with 253 idle polls and one substantive transfer in
+19.069 seconds. Timings depend on scheduling; these are not native model tests.
+
+The cause is unconditional empty transfer polling in `Proxy.do_CONNECT`, charged
+to the same envelope counter as substantive traffic. The host upstream poll
+waits up to 50 ms, and the proxy adds short waits; an idle connection therefore
+spends envelopes while waiting for useful data. Multiple tunnels and actual
+startup traffic can change the exhaustion time. This proves a host-side failure
+mechanism, **not the precise cause of any earlier generically classified live
+failure**, and does not identify a provider or TLS fault.
+
+New allowlisted `service_*` states distinguish envelope, wire-byte, buffered-line,
+outbound-message, deadline, pipe-closure, pipe-I/O, stderr-budget and envelope
+schema failures. No exception text or raw pipe content is copied into results.
+Fixtures test the exact 256/257 boundary, byte/buffer exhaustion, the unchanged
+32-second host deadline, closed/error pipes, stderr and malformed envelopes,
+secret exclusion, external-anchor verification and cgroup cleanup.
+
+All production limits and polling behavior remain unchanged during diagnosis.
+The smallest proposed correction is bounded idle-poll coalescing/backoff, tested
+with all permitted tunnels and delayed data in both directions, while retaining
+the envelope/byte limits, cancellation and wall deadlines. Simply exempting idle
+messages from accounting would remove a resource bound. The correction requires
+separate approval; another live attempt requires its own explicit authorization.
 
 Execute mode normally creates a private automatically archived conversation and
 incurs usage. One CLI invocation does not promise one provider request, one

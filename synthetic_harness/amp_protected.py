@@ -16,7 +16,7 @@ from .auth_egress import AuthEgress, resolve_auth
 from .login import CredentialStore, verify as verify_chain
 from .runner import EventLog
 from .tasks import canonical
-from .trusted_service import TrustedService
+from .trusted_service import TrustedService, ServiceBoundaryError
 
 
 PROBE_STATES = frozenset({'runtime_ready', 'runtime_failed', 'timeout', 'interrupted', 'boundary_failed',
@@ -212,7 +212,9 @@ with Server(('127.0.0.1',0),Proxy) as server:
         smoke = self.operation == 'smoke'
         result = initial_result() if smoke else {'state': 'boundary_failed', 'authenticated': None}
         result['state'] = 'boundary_failed'
-        deadline = time.monotonic() + (32 if smoke else 12)
+        started = time.monotonic()
+        deadline = started + (32 if smoke else 12)
+        transport = dict(transfer_envelopes=0, idle_polls=0, sent_bytes=0, received_bytes=0)
         try:
             while True:
                 message = self.read(deadline)
@@ -238,17 +240,31 @@ with Server(('127.0.0.1',0),Proxy) as server:
                     raise ValueError()
                 self.sequence += 1
                 try:
+                    before_bytes = self.egress.bytes
                     response = self.egress.exchange(message['request'])
                 except (ValueError, OSError):
                     if smoke:
                         result['state'] = 'egress_failed'
                     raise
+                if smoke and message['request']['op'] == 'transfer':
+                    transport['transfer_envelopes'] += 1
+                    transport['sent_bytes'] += response['sent']
+                    transport['received_bytes'] += self.egress.bytes - before_bytes - response['sent']
+                    if message['request']['data'] == '' and response == {'sent': 0, 'data': '', 'eof': False}:
+                        transport['idle_polls'] += 1
                 self.write({'op':'egress','id':message['id'],'response':response}, deadline)
         except KeyboardInterrupt:
             result['state'] = 'interrupted'
+        except ServiceBoundaryError as error:
+            if smoke:
+                result['state'] = error.code
         except (ValueError, OSError, TypeError, RecursionError):
             pass
         finally:
+            if smoke:
+                result['host_transport'] = dict(transport, received_envelopes=self.frames,
+                    wire_bytes=self.total, egress_opens=self.egress.opens,
+                    elapsed_ms=int((time.monotonic() - started) * 1000))
             self.log.append('probe_result', result)
             self.finish()
         return result

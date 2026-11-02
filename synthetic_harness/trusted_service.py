@@ -57,6 +57,17 @@ class PublicObservation:
         return self.observation
 
 
+class ServiceBoundaryError(ValueError):
+    """Allowlisted diagnostics only; never retain pipe contents or OS errors."""
+    codes = frozenset({'service_envelope_limit', 'service_byte_limit', 'service_buffer_limit',
+                       'service_send_limit', 'service_deadline', 'service_pipe_closed',
+                       'service_pipe_io', 'service_stderr_limit', 'service_envelope_schema'})
+
+    def __init__(self, code):
+        self.code = code if code in self.codes else 'service_envelope_schema'
+        super().__init__(self.code)
+
+
 class TrustedService:
     log_type = EventLog
     max_frames = 256
@@ -160,39 +171,53 @@ class TrustedService:
     def write(self, message, deadline):
         data = (canonical(message) + '\n').encode()
         if len(data) > 256 * 1024:
-            raise ValueError('Service write budget exceeded')
+            raise ServiceBoundaryError('service_send_limit')
         self.log.append('send', message)
-        while data:
-            if time.monotonic() >= deadline or not select.select(
-                    [], [self.process.stdin], [], max(0, deadline-time.monotonic()))[1]:
-                raise ValueError('Service deadline expired')
-            data = data[os.write(self.process.stdin.fileno(), data):]
+        try:
+            while data:
+                if time.monotonic() >= deadline or not select.select(
+                        [], [self.process.stdin], [], max(0, deadline-time.monotonic()))[1]:
+                    raise ServiceBoundaryError('service_deadline')
+                data = data[os.write(self.process.stdin.fileno(), data):]
+        except OSError:
+            raise ServiceBoundaryError('service_pipe_io') from None
 
     def read(self, deadline):
+        try:
+            return self._read(deadline)
+        except OSError:
+            raise ServiceBoundaryError('service_pipe_io') from None
+
+    def _read(self, deadline):
         while b'\n' not in self.buffer:
             readable = select.select([self.process.stdout, self.process.stderr], [], [],
                                      max(0, deadline-time.monotonic()))[0]
             if time.monotonic() >= deadline or not readable:
-                raise ValueError('Service deadline expired')
+                raise ServiceBoundaryError('service_deadline')
             if self.process.stderr in readable:
                 self.stderr.extend(os.read(self.process.stderr.fileno(), 4096)[:sandbox.MAX_STDERR-len(self.stderr)])
                 if len(self.stderr) >= sandbox.MAX_STDERR:
-                    raise ValueError('Service stderr budget exceeded')
+                    raise ServiceBoundaryError('service_stderr_limit')
             if self.process.stdout not in readable:
                 continue
             data = os.read(self.process.stdout.fileno(), 4096)
             if not data:
-                raise ValueError('Service closed its pipe')
+                raise ServiceBoundaryError('service_pipe_closed')
             self.total += len(data)
             self.buffer.extend(data)
-            if self.total > self.wire_bytes or len(self.buffer) > 256 * 1024:
-                raise ValueError('Service output budget exceeded')
+            if self.total > self.wire_bytes:
+                raise ServiceBoundaryError('service_byte_limit')
+            if len(self.buffer) > 256 * 1024:
+                raise ServiceBoundaryError('service_buffer_limit')
         line, _, remaining = self.buffer.partition(b'\n')
         self.buffer = bytearray(remaining)
         self.frames += 1
         if self.frames > self.max_frames:
-            raise ValueError('Service frame budget exceeded')
-        message = parse_request(line.decode('utf-8'), 256 * 1024)
+            raise ServiceBoundaryError('service_envelope_limit')
+        try:
+            message = parse_request(line.decode('utf-8'), 256 * 1024)
+        except (ValueError, TypeError, RecursionError):
+            raise ServiceBoundaryError('service_envelope_schema') from None
         self.log.append('receive', message)
         return message
 

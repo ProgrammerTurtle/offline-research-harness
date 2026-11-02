@@ -17,7 +17,9 @@ PROMPT = ('Compatibility test only. Do not call tools, delegate, or change anyth
           'The host will validate this proposal without applying it.')
 PROPOSAL = {'op': 'step', 'action': {'tool': 'check', 'args': {}}}
 STATES = {'in_progress', 'compatible', 'schema_rejected', 'output_limit', 'tool_activity',
-          'native_failed', 'native_error', 'timeout', 'boundary_failed', 'egress_failed', 'interrupted'}
+          'native_failed', 'native_error', 'timeout', 'boundary_failed', 'egress_failed', 'interrupted',
+          'service_envelope_limit', 'service_byte_limit', 'service_buffer_limit', 'service_send_limit',
+          'service_deadline', 'service_pipe_closed', 'service_pipe_io', 'service_stderr_limit', 'service_envelope_schema'}
 STAGES = ('launch', 'awaiting_init', 'awaiting_user', 'awaiting_assistant', 'awaiting_result', 'awaiting_exit')
 EVENTS = ('init', 'user', 'assistant', 'result', 'error', 'tool_activity', 'unknown')
 
@@ -60,8 +62,15 @@ def usage(value):
 def safe_result(value):
     """Validate both namespace envelopes and journal results; no arbitrary strings."""
     template = initial_result()
-    if type(value) is not dict or set(value) != set(template):
+    # Older anchored outcomes have no host counters; do not rewrite their evidence.
+    if type(value) is not dict or set(value) - {'host_transport'} != set(template):
         raise ValueError()
+    if 'host_transport' in value:
+        counters = value['host_transport']
+        if type(counters) is not dict or set(counters) != {'received_envelopes', 'wire_bytes',
+                'egress_opens', 'transfer_envelopes', 'idle_polls', 'sent_bytes', 'received_bytes', 'elapsed_ms'} \
+                or any(not integer(v, 10**9) for v in counters.values()):
+            raise ValueError()
     if value['state'] not in STATES or value['stage'] not in STAGES:
         raise ValueError()
     session = value['session_id']
