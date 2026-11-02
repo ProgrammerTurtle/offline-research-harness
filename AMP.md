@@ -64,15 +64,12 @@ Actual native continuation, tool/connector/hook/subagent suppression, model tran
 provider retries and cost enforcement remain prerequisites for credential-bearing use.
 No native `-x`, real key, or external endpoint is used in these adapter tests.
 
-Additional credential-free inspection of the pinned binary's non-model `tools list`
-command inside the same isolated runtime hit the eight-second child timeout;
-whole-service cleanup succeeded. No tool registry was obtained, so this probe
-does not verify wildcard disabling or remote tool/hook suppression. Its cause
-was not established; no networking, credentials or time limits were expanded.
-Native execution remains blocked rather than treating requested settings or an
-empty mock registry as evidence of enforcement.
+The first credential-free `tools list` probe timed out. Follow-up local TLS
+fixtures now distinguish authentication discovery, rejected account requests,
+and stalled transport; see Native tool discovery below. Native execution remains
+blocked: a tool listing is not evidence of effective execution restrictions.
 
-Validation: `python -m unittest discover -s tests -v` passed 110 tests;
+Validation: `python -m unittest discover -s tests -v` passed 111 tests;
 `python -m synthetic_harness validate` passed 2,160 seeded controls with zero
 failures. Targeted adapter tests cover six completion/escalation episodes across
 the three domains, stale echoes and session changes, nonzero exits after a valid
@@ -258,6 +255,52 @@ about Amp's retries. The protected wrapper retains stricter aggregate framing
 limits (256 frames / 2 MiB wire) in addition to the standalone egress budgets.
 Run `python -m unittest discover -s tests -p test_amp_tls.py -v` with the same
 frozen-runtime and cgroup prerequisites as the other native tests.
+
+## Native tool discovery against local fixtures
+
+`tests/test_amp_discovery.py` runs the actual pinned binary's documented
+`tools list --json --mode openai/gpt-6-astra`, not a generic HTTP client or an
+execute invocation. The command substitution, synthetic key, fixture CA and
+loopback routing exist only in tests. The production command allowlist and
+all isolation, resource and destination limits remain unchanged. No real key,
+account request, model inference or external endpoint is used by these probes.
+
+| Offline fixture/control | Native observation |
+| --- | --- |
+| No key supplied to child; local endpoint rejects requests | Requests `/api/auth/oauth-config`, then reaches eight-second child timeout. No successful login or tool list. |
+| Synthetic key; all API requests return 404 | Exits zero and lists seven built-ins. Requests `getUserInfo` and `loadPlugins`; telemetry was also observed. |
+| Same setup, HTTP 401 | Also exits zero and lists the same built-ins. **Discovery success is not authentication success.** |
+| Empty disable list, `['*']`, or all seven explicit tool names | Identical tool-name sets, including `shell_command`, `apply_patch`, and `skill`. Listing does not establish execution-time filtering. |
+| Local MCP canary, command-reject rule present | Process marker absent; removing only MCP rejection starts the canary and creates its marker. |
+| Remote MCP canary, URL-reject rule present | No request to its fixture path; removing only MCP rejection sends POST/GET to that path. |
+| Synthetic key; stalled TLS endpoint | Eight-second timeout, followed by whole-service cleanup. |
+
+The local and remote MCP controls are positive/negative pairs: they establish
+that the pinned native discovery path reads these settings and enforces the
+tested MCP startup restrictions. They do **not** establish hook suppression,
+server-side connector suppression, subagent restrictions, or builtin execution
+permissions. In particular, `amp.tools.disable` not changing this listing does
+not prove that execute mode ignores it; the listing may enumerate tools before
+execution-time filtering. No builtin tool was invoked by these tests.
+
+The no-key fixture shows an authentication-discovery path that can stall, while
+responsive rejecting fixtures let the synthetic-key command complete. These
+controlled observations explain why a bare offline probe is insufficient; they
+do not reconstruct the exact cause of the original uninstrumented timeout.
+Discovery can request plugins even with no configured MCP servers, so MCP
+rejection alone is not a general extension-disabling control. Failed plugin
+loads here do not establish what a successful authenticated load would do.
+
+All ten cases verify sanitized external anchors and service cleanup. Tests
+reject unexpected fixture request paths and prevent a connector fallback to a
+public endpoint. Native stdout is inspected only in the synthetic test; raw
+registry/error output is not added to the protected audit journal. Telemetry
+ordering/count is not a protocol contract and is not used as an assertion.
+
+The next gate is evidence for native builtin execution and plugin/hook restrictions
+using local mocks. Keep credential-bearing model execution disabled until those
+controls and native session continuation are established; do not use a successful
+`tools list` as permission to enable `-x`.
 
 ## Single-use read-only authentication check
 

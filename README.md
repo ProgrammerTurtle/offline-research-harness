@@ -33,6 +33,10 @@ authorized protected read-only list check authenticated successfully.
 Native non-model `threads list` probes against local TLS fixtures verify CA
 loading, certificate/hostname rejection, proxy use and redirect restrictions;
 they do not establish model-transport compatibility or native tool suppression.
+Native `tools list` probes also verify local/remote MCP startup rejection with
+positive controls. The listing still includes built-ins under disable settings
+and succeeds against HTTP 401 fixtures, so it proves neither builtin execution
+suppression nor authentication. See AMP.md for the remaining live-execution gates.
 
 ```sh
 python -m unittest discover -s tests -p test_harness.py -v
