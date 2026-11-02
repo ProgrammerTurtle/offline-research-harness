@@ -546,7 +546,8 @@ session ID, event/catalog counts, proposal-validation boolean, requested setting
 whether reported mode matches, bounded reported usage/duration/turn count, native
 exit and local elapsed/output counts. Effective model/effort/Fast and native retry
 count remain null: the documented stream does not independently attest them.
-Raw stream bytes are transient; stderr is discarded. Authoritative logs omit
+Raw stream bytes are transient; smoke stderr is classified in bounded namespace
+memory and discarded, as described below. Authoritative logs omit
 wire payloads and raw metadata; `verify` checks the external host anchor, not
 provider attestation. `egress_failed` identifies relay rejection, not an inferred
 TLS/provider cause. Other failures record the last reached stream stage.
@@ -558,6 +559,53 @@ tunnels, successful transfer exchanges, empty non-EOF polls, sent/received
 payload bytes and host probe elapsed milliseconds (excluding cleanup).
 These reveal local relay activity, not decrypted traffic or remote execution.
 Old anchored outcomes without these counters remain verifiable and unchanged.
+
+### Secret-safe native-exit diagnostics
+
+Smoke execution drains stdout and stderr concurrently under the existing
+30-second native / 32-second host deadlines and shared five-second cleanup
+allowance. Stdout/event, service-envelope/wire, egress and resource limits are
+unchanged. Stderr now has an additional 64-KiB cap; the 65,537th byte stops the
+test with `native_stderr_limit`. Raw stderr is never persisted, forwarded to the
+host, hashed into evidence or included in exceptions. Non-smoke operations keep
+their previous stderr-discarding behavior.
+
+The optional `native_diagnostic` result contains only an allowlisted category,
+bounded byte count and EOF/completeness boolean. Classification requires an exact
+match of the **entire** completed stderr stream, including newline. Substrings,
+ANSI-wrapped messages, extra text, secret-bearing suffixes, malformed bytes and
+truncated messages are not normalized into a known error. Outcomes without EOF
+are `incomplete`; complete unmatched output is `unknown`; empty completed stderr
+is `none`. Excess output is `limit`. A nonzero exit still reports `native_failed`
+and its last stream stage. Even exit zero plus a valid proposal is rejected as
+`native_diagnostic_error` if any stderr appeared, including unknown warnings.
+
+For pinned CLI `0.0.1793479144-g397d4e`, exact fixed messages support
+`reported_authentication_failure`, `reported_connectivity_failure` and
+`reported_plugin_initialization_failure`. The latter two are literal candidates
+from the pinned binary, validated with synthetic message fixtures; native
+emission was **not** established by this test matrix. A category describes a
+client report, not independent proof of authentication, network or plugin cause.
+Recognized structured stdout errors additionally retain only
+`native_error_subtype` (`error_during_execution` or `error_max_turns`); arbitrary
+error fields and nested causes are discarded. No guessed stderr JSON or generic
+certificate substring becomes a structured diagnosis.
+
+`tests/test_amp_smoke.py` executes the actual pinned binary against rejecting
+local TLS fixtures with synthetic keys, never real providers. HTTP 401 emitted
+the exact authentication diagnostic (68 stderr bytes). HTTP 404, 403 and 500
+produced unclassified messages (47, 57 and 60 bytes); an untrusted certificate
+also remained `unknown` (42 bytes). All five exited 1 at `awaiting_init` with no
+proposal. Fixture causes are independently known by construction; production
+classification does not receive those labels and must not infer them from exit
+code or byte length. Untrusted TLS reached no HTTP request in the fixture.
+
+Tests cover split messages, secret contamination, unknown/malformed/truncated
+errors, exact/over-limit stderr, late stderr and nonzero exits, stream/output
+limits, sanitization, external anchors and cleanup. Old outcomes lacking these
+optional fields remain verifiable without rewriting evidence. Earlier discarded
+stderr cannot be recovered or retrospectively classified. Diagnostics add no
+live retry authorization and do not establish a relationship to remote records.
 
 ### Offline relay-budget diagnosis
 

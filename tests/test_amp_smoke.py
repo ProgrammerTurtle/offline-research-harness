@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from synthetic_harness import amp_protected as protected, sandbox
-from synthetic_harness.amp_smoke import PROMPT, SmokeStream, safe_result
+from synthetic_harness.amp_smoke import PROMPT, SmokeStream, safe_result, NativeDiagnostic
 from synthetic_harness.login import CredentialStore
 from test_amp_tls import SERVER
 
@@ -40,6 +40,37 @@ def events():
 
 
 class AmpSmokeTests(unittest.TestCase):
+    def test_diagnostics_require_complete_exact_messages_and_discard_secrets(self):
+        known = b"Error: Invalid or missing API key. Run 'amp login' to authenticate.\n"
+        for split in range(len(known)+1):
+            parser = NativeDiagnostic()
+            parser.feed(known[:split]); parser.feed(known[split:])
+            self.assertEqual(parser.result()['category'], 'incomplete')
+            parser.complete = True
+            self.assertEqual(parser.result()['category'], 'reported_authentication_failure')
+        for data in (known[:-1], known+SECRET.encode(), SECRET.encode()+known,
+                     known+known, b'\x1b[31m'+known, b'\xff\x00', b'{"code":"UNAUTHORIZED","key":"'+SECRET.encode()+b'"}',
+                     b'Error: certificate has expired\n', b'Error: '+SECRET.encode()+b'\n'):
+            parser = NativeDiagnostic(); parser.feed(data); parser.complete = True
+            self.assertEqual(parser.result()['category'], 'unknown')
+            self.assertNotIn(SECRET, json.dumps(parser.result()))
+        for data, category in (
+                (b'Error: Cannot reach Amp servers. Are you offline?\n', 'reported_connectivity_failure'),
+                (b'Error: Failed to load global plugins\n', 'reported_plugin_initialization_failure')):
+            parser = NativeDiagnostic(); parser.feed(data); parser.complete = True
+            self.assertEqual(parser.result()['category'], category)
+        for subtype in ('error_during_execution', 'error_max_turns'):
+            stream = SmokeStream()
+            self.assertFalse(stream.accept(json.dumps({'type':'system','subtype':subtype,'error':SECRET})))
+            self.assertEqual(stream.result['native_error_subtype'], subtype)
+            self.assertNotIn(SECRET, json.dumps(safe_result(stream.result)))
+        for diagnostic in ({'category':SECRET,'stderr_bytes':1,'complete':True},
+                           {'category':'none','stderr_bytes':1,'complete':True},
+                           {'category':'unknown','stderr_bytes':2,'complete':False},
+                           {'category':'limit','stderr_bytes':65538,'complete':False}):
+            result = SmokeStream().result; result['native_diagnostic'] = diagnostic
+            with self.assertRaises(ValueError): safe_result(result)
+
     def test_fixed_operation_success_failures_limits_and_one_shot(self):
         lines = [json.dumps(e) for e in events()]
         good = '\n'.join(lines) + '\n'
@@ -61,6 +92,13 @@ class AmpSmokeTests(unittest.TestCase):
              '', 'native_error', 'awaiting_init'),
             ('forged_envelope', json.dumps({'op': 'smoke_result', 'result': {'state': 'compatible', 'secret': SECRET}}) + '\n',
              '', 'schema_rejected', 'awaiting_init'),
+            ('stderr_unknown', good, f'print({SECRET!r},file=sys.stderr)', 'native_diagnostic_error', 'awaiting_exit'),
+            ('stderr_auth', '', 'print("Error: Invalid or missing API key. Run \'amp login\' to authenticate.",file=sys.stderr);sys.exit(1)',
+             'native_failed', 'awaiting_init'),
+            ('stderr_limit', '', 'sys.stderr.write("x"*65537);sys.stderr.flush();time.sleep(60)', 'native_stderr_limit', 'awaiting_init'),
+            ('stderr_exact', good, 'sys.stderr.write("x"*65536)', 'native_diagnostic_error', 'awaiting_exit'),
+            ('stderr_late', good, f'time.sleep(.05);print({SECRET!r},file=sys.stderr);sys.exit(7)', 'native_failed', 'awaiting_exit'),
+            ('stderr_malformed', '', 'sys.stderr.buffer.write(b"\\xff\\x00");sys.exit(1)', 'native_failed', 'awaiting_init'),
             ('interrupted', '', 'time.sleep(60)', 'interrupted', 'launch'),
             ('timeout', lines[0] + '\n', 'time.sleep(60)', 'timeout', 'awaiting_user')]
         with tempfile.TemporaryDirectory() as directory:
@@ -80,7 +118,6 @@ class AmpSmokeTests(unittest.TestCase):
                         code = ("import os,sys,time\nassert sys.stdin.read()==''\n"
                                 "assert not os.path.exists('/home/user/workspace')\n"
                                 f"assert os.environ['AMP_API_KEY']=={SECRET!r}\n"
-                                "print(os.environ['AMP_API_KEY'],file=sys.stderr)\n"
                                 f"sys.stdout.write({output!r});sys.stdout.flush()\n{tail}\n")
                         # Oversized fixtures go in the source tmpfs, not oversized argv.
                         source = service.source().replace(b'    env=dict(os.environ)',
@@ -96,6 +133,13 @@ class AmpSmokeTests(unittest.TestCase):
                         elapsed = time.monotonic() - started
                         self.assertLess(elapsed, 35)
                         self.assertEqual((result['state'], result['stage']), (expected, stage))
+                        if name.startswith('stderr_'):
+                            diagnostic = result['native_diagnostic']
+                            self.assertEqual(diagnostic['category'], 'reported_authentication_failure' if name == 'stderr_auth'
+                                             else 'limit' if name == 'stderr_limit' else 'unknown')
+                            self.assertEqual(diagnostic['complete'], name != 'stderr_limit')
+                            if name in ('stderr_exact', 'stderr_limit'):
+                                self.assertEqual(diagnostic['stderr_bytes'], 65536 if name == 'stderr_exact' else 65537)
                         if expected == 'compatible':
                             self.assertTrue(result['proposal_validated'])
                             self.assertEqual(result['events'], dict(init=1, user=1, assistant=1, result=1,
@@ -128,6 +172,11 @@ class AmpSmokeTests(unittest.TestCase):
                         print('offline-smoke', name, result['state'], result['stage'], flush=True)
 
     def test_pinned_native_smoke_rejecting_local_backend(self):
+        for mode in ('404', '401', '403', '500', 'untrusted'):
+            with self.subTest(mode=mode):
+                self._native_failure(mode)
+
+    def _native_failure(self, mode):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory); (base/'audit').mkdir()
             cert, key = base/'fixture.pem', base/'fixture.key'
@@ -136,7 +185,9 @@ class AmpSmokeTests(unittest.TestCase):
                             '-keyout', str(key), '-out', str(cert)], check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             record = base/'requests'
-            server = subprocess.Popen([sys.executable, '-u', '-c', SERVER, str(cert), str(key), str(record), 'fixture'],
+            fixture = SERVER.replace('404 Not Found', {'401':'401 Unauthorized','403':'403 Forbidden',
+                                     '500':'500 Internal Server Error'}.get(mode,'404 Not Found'))
+            server = subprocess.Popen([sys.executable, '-u', '-c', fixture, str(cert), str(key), str(record), 'fixture'],
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                       env={'PATH': '/usr/bin', 'LANG': 'C.UTF-8'})
             try:
@@ -149,7 +200,8 @@ class AmpSmokeTests(unittest.TestCase):
                     service = protected.ProtectedAmpService(base/'audit'/'native', store, 'smoke', egress=egress)
                     source = service.source().replace(b'    env=dict(os.environ)',
                         (f"    Path('/tmp/fixture-ca.pem').write_text({cert.read_text()!r})\n    env=dict(os.environ)").encode())
-                    source = source.replace(b"NODE_EXTRA_CA_CERTS='/opt/public-ca.pem'", b"NODE_EXTRA_CA_CERTS='/tmp/fixture-ca.pem'")
+                    if mode != 'untrusted':
+                        source = source.replace(b"NODE_EXTRA_CA_CERTS='/opt/public-ca.pem'", b"NODE_EXTRA_CA_CERTS='/tmp/fixture-ca.pem'")
                     def connect():
                         sock = socket.create_connection(('127.0.0.1', port), timeout=2)
                         sock.setblocking(False)
@@ -158,8 +210,17 @@ class AmpSmokeTests(unittest.TestCase):
                             patch.object(egress, 'connect', side_effect=connect), patch.object(service, 'source', return_value=source), service:
                         result = service.probe()
                     self.assertEqual((result['state'], result['stage'], result['exit_code']), ('native_failed', 'awaiting_init', 1))
+                    print('native-stderr-diagnostic', mode, json.dumps(result['native_diagnostic']), flush=True)
+                    self.assertEqual(result['native_diagnostic']['category'],
+                                     'reported_authentication_failure' if mode == '401' else 'unknown')
+                    self.assertTrue(result['native_diagnostic']['complete'])
+                    self.assertGreater(result['native_diagnostic']['stderr_bytes'], 0)
                     requests = json.loads(record.read_text())['requests']
-                    self.assertIn('POST /api/internal?getUserInfo HTTP/1.1', requests)
+                    if mode == 'untrusted':
+                        self.assertEqual(requests, [])
+                        self.assertGreater(json.loads(record.read_text())['errors'], 0)
+                    else:
+                        self.assertIn('POST /api/internal?getUserInfo HTTP/1.1', requests)
                     self.assertLessEqual(set(requests), {'POST /api/internal?getUserInfo HTTP/1.1', 'POST /api/telemetry HTTP/1.1'})
                     self.assertFalse(result['proposal_validated'])
                     self.assertEqual(sum(result['events'].values()), 0)

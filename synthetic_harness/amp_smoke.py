@@ -17,11 +17,44 @@ PROMPT = ('Compatibility test only. Do not call tools, delegate, or change anyth
           'The host will validate this proposal without applying it.')
 PROPOSAL = {'op': 'step', 'action': {'tool': 'check', 'args': {}}}
 STATES = {'in_progress', 'compatible', 'schema_rejected', 'output_limit', 'tool_activity',
+          'native_stderr_limit', 'native_diagnostic_error',
           'native_failed', 'native_error', 'timeout', 'boundary_failed', 'egress_failed', 'interrupted',
           'service_envelope_limit', 'service_byte_limit', 'service_buffer_limit', 'service_send_limit',
           'service_deadline', 'service_pipe_closed', 'service_pipe_io', 'service_stderr_limit', 'service_envelope_schema'}
 STAGES = ('launch', 'awaiting_init', 'awaiting_user', 'awaiting_assistant', 'awaiting_result', 'awaiting_exit')
 EVENTS = ('init', 'user', 'assistant', 'result', 'error', 'tool_activity', 'unknown')
+
+# Exact messages only, pinned CLI 0.0.1793479144-g397d4e. These are reports
+# from trusted client infrastructure, never independent root-cause evidence.
+DIAGNOSTIC_MESSAGES = {
+    b"Error: Invalid or missing API key. Run 'amp login' to authenticate.\n": 'reported_authentication_failure',
+    b'Error: Cannot reach Amp servers. Are you offline?\n': 'reported_connectivity_failure',
+    b'Error: Cannot reach Amp servers. Check your internet connection and try again.\n': 'reported_connectivity_failure',
+    b'Error: Unable to connect to Amp servers after multiple attempts\n': 'reported_connectivity_failure',
+    b'Error: Failed to load global plugins\n': 'reported_plugin_initialization_failure',
+}
+DIAGNOSTIC_CATEGORIES = {'none', 'unknown', 'incomplete', 'limit', *DIAGNOSTIC_MESSAGES.values()}
+
+
+class NativeDiagnostic:
+    """At most 64 KiB transient namespace memory; no raw text leaves this class."""
+    def __init__(self):
+        self.data = bytearray()
+        self.total = 0
+        self.complete = False
+
+    def feed(self, data):
+        self.total += len(data)
+        if self.total > 65536:
+            self.data.clear()
+            return False
+        self.data.extend(data)
+        return True
+
+    def result(self):
+        category = ('limit' if self.total > 65536 else 'incomplete' if not self.complete else
+                    'none' if not self.data else DIAGNOSTIC_MESSAGES.get(bytes(self.data), 'unknown'))
+        return {'category': category, 'stderr_bytes': self.total, 'complete': self.complete}
 
 
 def initial_result():
@@ -63,8 +96,24 @@ def safe_result(value):
     """Validate both namespace envelopes and journal results; no arbitrary strings."""
     template = initial_result()
     # Older anchored outcomes have no host counters; do not rewrite their evidence.
-    if type(value) is not dict or set(value) - {'host_transport'} != set(template):
+    if type(value) is not dict or set(value) - {'host_transport', 'native_diagnostic', 'native_error_subtype'} != set(template):
         raise ValueError()
+    if 'native_error_subtype' in value and value['native_error_subtype'] not in ('error_during_execution', 'error_max_turns'):
+        raise ValueError()
+    if 'native_diagnostic' in value:
+        diagnostic = value['native_diagnostic']
+        if type(diagnostic) is not dict or set(diagnostic) != {'category', 'stderr_bytes', 'complete'} \
+                or type(diagnostic['category']) is not str or diagnostic['category'] not in DIAGNOSTIC_CATEGORIES \
+                or not integer(diagnostic['stderr_bytes'], 65537) or type(diagnostic['complete']) is not bool:
+            raise ValueError()
+        category, count, complete = diagnostic['category'], diagnostic['stderr_bytes'], diagnostic['complete']
+        if (category == 'limit' and (count != 65537 or complete)) \
+                or (category == 'incomplete' and (complete or count > 65536)) \
+                or (category not in ('limit', 'incomplete') and (not complete or count > 65536)) \
+                or (category == 'none' and count != 0) \
+                or (category not in ('none', 'incomplete', 'limit') and count == 0) \
+                or (value['state'] == 'compatible' and category != 'none'):
+            raise ValueError()
     if 'host_transport' in value:
         counters = value['host_transport']
         if type(counters) is not dict or set(counters) != {'received_envelopes', 'wire_bytes',
@@ -141,6 +190,7 @@ class SmokeStream:
             if kind in ('system', 'result') and event.get('subtype') in ('error_during_execution', 'error_max_turns'):
                 r['events']['error'] += 1
                 r['state'] = 'native_error'
+                r['native_error_subtype'] = event['subtype']
                 return False
             label = 'init' if kind == 'system' and event.get('subtype') == 'init' else kind
             r['events'][label if label in EVENTS else 'unknown'] += 1
@@ -211,28 +261,45 @@ class SmokeStream:
 
 def run_smoke(command, env, progress):
     stream = SmokeStream()
+    diagnostic = NativeDiagnostic()
+    def snapshot():
+        stream.result['native_diagnostic'] = diagnostic.result()
+        return safe_result(stream.result)
     started = time.monotonic()
     deadline = started + 30
     pending = bytearray()
     child = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
-                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, close_fds=True)
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
     os.set_blocking(child.stdout.fileno(), False)
-    progress(safe_result(stream.result))
+    os.set_blocking(child.stderr.fileno(), False)
+    progress(snapshot())
     eof = False
     while time.monotonic() < deadline:
         r = stream.result
         r['elapsed_ms'] = int((time.monotonic() - started) * 1000)
-        if eof:
+        if eof and diagnostic.complete:
             code = child.poll()
             if code is not None:
                 r['exit_code'] = code
                 r['state'] = ('native_failed' if code != 0 else 'compatible'
                               if r['stage'] == 'awaiting_exit' and not pending else 'schema_rejected')
-                return safe_result(r)
+                if r['state'] == 'compatible' and diagnostic.total:
+                    r['state'] = 'native_diagnostic_error'
+                return snapshot()
             time.sleep(.01)
             continue
-        ready, _, _ = select.select([child.stdout], [], [], min(.05, max(0, deadline - time.monotonic())))
+        pipes = ([] if eof else [child.stdout]) + ([] if diagnostic.complete else [child.stderr])
+        ready, _, _ = select.select(pipes, [], [], min(.05, max(0, deadline - time.monotonic())))
         if not ready:
+            continue
+        if child.stderr in ready:
+            data = os.read(child.stderr.fileno(), min(4096, 65537-diagnostic.total))
+            if not data:
+                diagnostic.complete = True
+            elif not diagnostic.feed(data):
+                r['state'] = 'native_stderr_limit'
+                return snapshot()
+        if child.stdout not in ready:
             continue
         data = os.read(child.stdout.fileno(), min(4096, 262145 - r['stdout_bytes']))
         if not data:
@@ -241,21 +308,21 @@ def run_smoke(command, env, progress):
         r['stdout_bytes'] += len(data)
         if r['stdout_bytes'] > 262144:
             r['state'] = 'output_limit'
-            return safe_result(r)
+            return snapshot()
         pending.extend(data)
         while b'\n' in pending:
             line, _, rest = pending.partition(b'\n')
             pending = bytearray(rest)
             if len(line) > 65536:
                 r['state'] = 'output_limit'
-                return safe_result(r)
+                return snapshot()
             if not stream.accept(line):
-                return safe_result(stream.result)
-            progress(safe_result(stream.result))
+                return snapshot()
+            progress(snapshot())
         if len(pending) > 65536:
             r['state'] = 'output_limit'
-            return safe_result(r)
+            return snapshot()
     stream.result.update(state='timeout', elapsed_ms=30000)
     # Parent receives the result and kills the entire service cgroup, including
     # this child and descendants. No retry or separate child cleanup allowance.
-    return safe_result(stream.result)
+    return snapshot()
