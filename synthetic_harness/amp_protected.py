@@ -4,6 +4,7 @@ import argparse
 import getpass
 import inspect
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -105,9 +106,13 @@ class ProtectedLog(EventLog):
 class ProtectedAmpService(AmpRuntimeProbe):
     log_type = ProtectedLog
 
-    def __init__(self, output, store, operation='--version', *, egress=None):
+    def __init__(self, output, store, operation='--version', *, egress=None, smoke_authorization=None):
         super().__init__(output, '--version' if operation in ('check', 'smoke') else operation)
         self.operation = operation
+        if smoke_authorization is not None and (operation != 'smoke' or type(smoke_authorization) is not str
+                or re.fullmatch('[0-9a-f]{32}', smoke_authorization) is None):
+            raise ValueError('Expected explicit smoke-only authorization identifier')
+        self.smoke_marker = 'smoke-used' if smoke_authorization is None else f'smoke-{smoke_authorization}-used'
         if store.fd is None:
             raise ValueError('Exclusive explicit store lease required')
         audit = Path(output).absolute().parent.resolve()
@@ -133,8 +138,8 @@ class ProtectedAmpService(AmpRuntimeProbe):
             raise ValueError('Protected credential file rejected')
         if self.operation in ('check', 'smoke'):
             # Reserve before launching native code. Failure/crash consumes this
-            # store's check; never remove or automatically reset this marker.
-            marker = os.open('smoke-used' if self.operation == 'smoke' else 'check-used',
+            # authorization; never remove or automatically reset any marker.
+            marker = os.open(self.smoke_marker if self.operation == 'smoke' else 'check-used',
                              os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
                              0o400, dir_fd=self.store.fd)
             os.fsync(marker); os.close(marker); os.fsync(self.store.fd)
@@ -301,11 +306,15 @@ def main():
     parser.add_argument('--anchor', type=Path)
     parser.add_argument('--enable-check-egress', action='store_true')
     parser.add_argument('--enable-smoke-egress', action='store_true')
+    parser.add_argument('--smoke-authorization', help='Explicitly approved one-shot identifier: 32 lowercase hex digits')
     args = parser.parse_args()
     if args.enable_check_egress != (args.operation == 'check'):
         parser.error('Only check requires --enable-check-egress')
     if args.enable_smoke_egress != (args.operation == 'smoke'):
         parser.error('Only smoke requires --enable-smoke-egress')
+    if args.smoke_authorization is not None and (args.operation != 'smoke' or
+            re.fullmatch('[0-9a-f]{32}', args.smoke_authorization) is None):
+        parser.error('Authorization identifier requires smoke and 32 lowercase hex digits')
     if args.operation == 'verify':
         if args.output is None or args.anchor is None: parser.error('output and anchor required')
         print(canonical(verify(args.output, args.anchor))); return 0
@@ -333,7 +342,8 @@ def main():
             egress = (AmpEgress(timeout=32) if args.operation == 'smoke' else
                       AmpEgress(timeout=15,single_connection=True) if args.operation == 'check' else None)
             try:
-                with ProtectedAmpService(args.output,store,args.operation if egress else '--version',egress=egress) as service:
+                with ProtectedAmpService(args.output,store,args.operation if egress else '--version',egress=egress,
+                                         smoke_authorization=args.smoke_authorization) as service:
                     result=service.probe()
             finally:
                 if egress is not None: egress.close()

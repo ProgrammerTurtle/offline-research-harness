@@ -508,6 +508,20 @@ Existing `check-used` authentication markers are neither reused nor reset. Each
 invocation requires explicit human authorization; do not delete markers, copy
 keys into new stores, or automatically retry to get another attempt.
 
+For a separately approved subsequent attempt in the same protected store,
+`--smoke-authorization <32-lowercase-hex-digits>` selects a new, operation-specific
+`home/smoke-<identifier>-used` marker. The trusted operator must supply the
+identifier for that approval; the CLI never generates or advances one on failure.
+This is an operator-managed authorization label, not independent proof of human
+consent. The marker is exclusively created and fsynced before spawn, and remains
+consumed even if spawning fails. Omitting the option retains the original
+`smoke-used` behavior. Old markers, keys and evidence are never replaced. The
+option is rejected for other operations and does not change the fixed prompt,
+command, limits, egress or task-action prohibition. Fresh output and external
+anchor paths are still required. Offline fixtures verify success/failure
+consumption, duplicate rejection before spawn, startup-failure consumption,
+invalid identifiers, legacy marker preservation and anchored results.
+
 The native child has a 30-second wall deadline and closed stdin. Stdout is read
 incrementally, capped at 256 KiB total and 64 KiB per JSON event (excluding its
 newline). A single five-second budget covers whole-service cgroup cleanup.

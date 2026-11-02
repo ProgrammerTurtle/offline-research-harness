@@ -191,8 +191,60 @@ class AmpSmokeTests(unittest.TestCase):
             unsafe = copy.deepcopy(stream.result); unsafe[field] = value
             with self.assertRaises(ValueError): safe_result(unsafe)
 
+    def test_fresh_authorization_preserves_old_markers_and_is_single_use(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); (base/'audit').mkdir()
+            CredentialStore.create(base/'store')
+            with CredentialStore(base/'store') as store:
+                protected.provision(store, SECRET)
+                originals = {}
+                for name in ('check-used', 'smoke-used'):
+                    path = store.path/'home'/name
+                    path.write_bytes(b'previous-consumed-authorization'); path.chmod(0o400)
+                    originals[name] = (path.stat(), path.read_bytes())
+                with patch.object(protected, 'resolve_auth', return_value=(ipaddress.ip_address('93.184.216.34'),)), \
+                        patch.object(protected.AmpEgress, 'connect', side_effect=AssertionError('Network prohibited')):
+                    for bad in ('', '../check-used', 'a'*31, 'A'*32, 'b'*33, 3):
+                        with self.assertRaises(ValueError):
+                            protected.ProtectedAmpService(base/'audit'/'bad', store, 'smoke',
+                                egress=protected.AmpEgress(timeout=32), smoke_authorization=bad)
+                    for ident, data, state in (
+                            ('a'*32, '\n'.join(json.dumps(e) for e in events())+'\n', 'compatible'),
+                            ('b'*32, 'malformed\n', 'schema_rejected')):
+                        service = protected.ProtectedAmpService(base/'audit'/ident, store, 'smoke',
+                            egress=protected.AmpEgress(timeout=32), smoke_authorization=ident)
+                        command = ['/usr/bin/python3.11','-I','-S','-c',f'print({data!r},end="",flush=True)']
+                        with patch.object(service, 'command', return_value=command), service:
+                            result = service.probe()
+                        self.assertEqual(result['state'], state)
+                        self.assertTrue((store.path/'home'/f'smoke-{ident}-used').exists())
+                        again = protected.ProtectedAmpService(base/'audit'/(ident+'-again'), store, 'smoke',
+                            egress=protected.AmpEgress(timeout=32), smoke_authorization=ident)
+                        with self.assertRaises(FileExistsError):
+                            with again: self.fail('Authorization reused')
+                        self.assertIsNone(again.process)
+                        anchor = base/(ident+'-root'); anchor.write_text(json.dumps({'root':service.receipt['root']}))
+                        self.assertEqual(protected.verify(service.output, anchor)['outcome'], result)
+                    failed = protected.ProtectedAmpService(base/'audit'/'spawn-failure', store, 'smoke',
+                        egress=protected.AmpEgress(timeout=32), smoke_authorization='c'*32)
+                    with patch('synthetic_harness.trusted_service.subprocess.Popen', side_effect=OSError('fixture')):
+                        with self.assertRaises(OSError):
+                            with failed: self.fail('Spawn unexpectedly succeeded')
+                    self.assertTrue((store.path/'home'/('smoke-'+'c'*32+'-used')).exists())
+                    legacy = protected.ProtectedAmpService(base/'audit'/'legacy', store, 'smoke',
+                        egress=protected.AmpEgress(timeout=32))
+                    with self.assertRaises(FileExistsError):
+                        with legacy: self.fail('Legacy authorization reused')
+                    for name, (info, data) in originals.items():
+                        path = store.path/'home'/name
+                        self.assertEqual((path.stat().st_ino, path.stat().st_mtime_ns, path.read_bytes()),
+                                         (info.st_ino, info.st_mtime_ns, data))
+                    self.assertFalse(list(sandbox.CGROUP.glob('service-*')))
+
     def test_smoke_requires_own_explicit_gate(self):
-        for args in (['smoke'], ['smoke', '--enable-check-egress'], ['check', '--enable-smoke-egress']):
+        for args in (['smoke'], ['smoke', '--enable-check-egress'], ['check', '--enable-smoke-egress'],
+                     ['probe', '--smoke-authorization', 'a'*32],
+                     ['smoke', '--enable-smoke-egress', '--smoke-authorization', '../smoke-used']):
             result = subprocess.run([sys.executable, '-m', 'synthetic_harness.amp_protected', *args],
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 2)
