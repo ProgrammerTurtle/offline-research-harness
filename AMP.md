@@ -547,11 +547,13 @@ Old anchored outcomes without these counters remain verifiable and unchanged.
 
 ### Offline relay-budget diagnosis
 
-`tests/test_amp_boundary.py` exercises the unchanged production proxy and relay
-against a local socket pair, with synthetic credentials and external connections
-forbidden. An idle CONNECT tunnel exhausts the 256-envelope budget without any
-payload bytes: initial progress + tunnel open + 254 empty transfers are accepted;
-the next transfer is envelope 257 and is rejected before a receive log entry.
+The pre-fix `tests/test_amp_boundary.py` at commit
+[`7c134ec`](https://github.com/ProgrammerTurtle/offline-research-harness/commit/7c134ec87feb6d36317cb8b1a2cb8ec6d8a9181d)
+exercised the production proxy and relay against a local socket pair, with
+synthetic credentials and external connections forbidden. An idle CONNECT tunnel
+exhausted the 256-envelope budget without any payload bytes: initial progress +
+tunnel open + 254 empty transfers were accepted; the next transfer was envelope
+257 and was rejected before a receive log entry.
 In the targeted run this took 19.242 seconds and 20,471 stdout wire bytes, below
 the 30-second native deadline and 2-MiB wire cap. A seven-byte upstream control
 reached the same boundary with 253 idle polls and one substantive transfer in
@@ -572,12 +574,45 @@ Fixtures test the exact 256/257 boundary, byte/buffer exhaustion, the unchanged
 32-second host deadline, closed/error pipes, stderr and malformed envelopes,
 secret exclusion, external-anchor verification and cgroup cleanup.
 
-All production limits and polling behavior remain unchanged during diagnosis.
-The smallest proposed correction is bounded idle-poll coalescing/backoff, tested
-with all permitted tunnels and delayed data in both directions, while retaining
-the envelope/byte limits, cancellation and wall deadlines. Simply exempting idle
-messages from accounting would remove a resource bound. The correction requires
-separate approval; another live attempt requires its own explicit authorization.
+### Bounded idle backoff correction
+
+Before applying the correction, the pre-fix fixture reproduced the same failure
+at 19.100 seconds (idle) and 19.010 seconds (seven-byte control). `Proxy.do_CONNECT`
+now doubles its per-tunnel idle wait from 10 ms to a maximum of one second when
+an exchange transfers no bytes. Actual byte progress resets the wait. Local
+writes and EOF wake the socket select immediately; pending unsent data uses the
+same bounded wait when upstream cannot accept it. Upstream-only arrival can incur
+up to one additional second of polling delay, plus host queueing and scheduling.
+No global sleep is introduced and the host's 50-ms exchange wait is unchanged.
+
+The same production bridge serves protected Codex and Amp operations. All
+envelopes still count, including empty transfers; 256 envelopes, 2 MiB of service
+wire data, egress payload accounting, native/host deadlines, namespace/resource
+limits, cancellation and cgroup cleanup are unchanged. Activity can still exhaust
+the shared budget: this fixes idle polling, not arbitrary sustained traffic or
+adversarial bandwidth fairness.
+
+The current `tests/test_amp_boundary.py` uses only synthetic children/credentials
+and local socket pairs. Targeted measured results (host probe time, not cleanup):
+
+| Fixture | Result | Received envelopes | Host time |
+| --- | --- | ---: | ---: |
+| One idle tunnel | Native 30-second timeout, not envelope exhaustion | 36 | 30.441 s |
+| All four permitted idle tunnels | Same native timeout | 138 | 30.445 s |
+| Four tunnels, delayed bidirectional traffic and 20 busy-tunnel round trips | Synthetic compatible stream | 151 | 8.182 s |
+| Native stdout flood with four tunnels open | `output_limit` | 33 | 3.092 s |
+| Injected operator cancellation with four tunnels open | `interrupted` | 12 | 1.340 s |
+
+The traffic fixture checks exact per-tunnel data and independent upstream timed
+arrivals: 72 sent / 76 received payload bytes, with acknowledgments 208–691 ms
+after upstream dispatch. Other tunnels deliver their delayed client data while
+the busy tunnel is active. These are observed fixture bounds, not general latency
+or fairness guarantees. Every case verifies sanitized anchored outcomes and no
+remaining service cgroup; the boundary matrix still enforces envelope/byte floods
+and the 32-second host watchdog. Old anchored outcomes remain valid without new
+fields or rewritten evidence. These tests establish relay behavior, not live Amp
+startup compatibility. Any live retry still needs separate explicit authorization
+and a fresh authorized one-shot path; consumed markers must never be reset.
 
 Execute mode normally creates a private automatically archived conversation and
 incurs usage. One CLI invocation does not promise one provider request, one

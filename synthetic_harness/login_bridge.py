@@ -57,8 +57,11 @@ class Proxy(BaseHTTPRequestHandler):
             self.end_headers()
             self.connection.settimeout(1)
             pending = b''
+            idle_wait = .01
             while True:
-                if not pending and select.select([self.connection], [], [], .01)[0]:
+                # Local writes/EOF wake immediately; idle upstream polls back off
+                # independently per tunnel without exempting any relay envelopes.
+                if not pending and select.select([self.connection], [], [], idle_wait)[0]:
                     pending = self.connection.recv(16384)
                     if not pending:
                         return
@@ -70,8 +73,12 @@ class Proxy(BaseHTTPRequestHandler):
                     self.connection.sendall(data)
                 if reply['eof']:
                     return
-                if not data and not pending:
-                    time.sleep(.01)
+                if not data and not reply['sent']:
+                    if pending:
+                        time.sleep(idle_wait)
+                    idle_wait = min(1.0, idle_wait * 2)
+                else:
+                    idle_wait = .01
         except Exception:
             # Never print decrypted headers, device codes or exception payloads.
             return
