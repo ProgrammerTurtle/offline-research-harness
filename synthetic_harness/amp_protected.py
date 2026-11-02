@@ -1,4 +1,4 @@
-"""Operator-only Amp credential boundary. No login or model commands enabled."""
+"""Operator-only Amp credential boundary with separately gated one-shot smoke."""
 
 import argparse
 import getpass
@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from .amp_execute import AmpRuntimeProbe, SETTINGS, AMP_SHA256
+from .amp_smoke import PROMPT, initial_result, safe_result
 from .auth_egress import AuthEgress, resolve_auth
 from .login import CredentialStore, verify as verify_chain
 from .runner import EventLog
@@ -84,15 +85,18 @@ def provision(store, value):
 class ProtectedLog(EventLog):
     def append(self, kind, payload):
         if kind == 'configuration':
-            safe = {'profile': 'amp-protected-offline', 'binary_sha256': AMP_SHA256,
+            safe = {'profile': 'amp-protected', 'binary_sha256': AMP_SHA256,
                     'program_sha256': payload['actor_sha256'], 'filter_sha256': payload['filter_sha256']}
         elif kind in ('send', 'receive', 'end', 'failure'):
             safe = {}  # Never serialize bytes, exceptions, stderr, paths or account data.
         elif kind == 'probe_result':
-            state = payload.get('state')
-            safe = {'state': state if type(state) is str and state in
-                    PROBE_STATES
-                    else 'boundary_failed', 'authenticated': True if state == 'authenticated' else None}
+            if 'stage' in payload:
+                safe = safe_result(payload)
+            else:
+                state = payload.get('state')
+                safe = {'state': state if type(state) is str and state in
+                        PROBE_STATES
+                        else 'boundary_failed', 'authenticated': True if state == 'authenticated' else None}
         else:
             raise ValueError('Unknown protected event')
         super().append(kind, safe)
@@ -102,7 +106,7 @@ class ProtectedAmpService(AmpRuntimeProbe):
     log_type = ProtectedLog
 
     def __init__(self, output, store, operation='--version', *, egress=None):
-        super().__init__(output, '--version' if operation == 'check' else operation)
+        super().__init__(output, '--version' if operation in ('check', 'smoke') else operation)
         self.operation = operation
         if store.fd is None:
             raise ValueError('Exclusive explicit store lease required')
@@ -113,6 +117,8 @@ class ProtectedAmpService(AmpRuntimeProbe):
             raise ValueError('Restricted Amp transport required')
         if operation == 'check' and (egress is None or not egress.single_connection):
             raise ValueError('Check requires explicit single-connection egress')
+        if operation == 'smoke' and egress is None:
+            raise ValueError('Smoke requires explicit restricted egress')
         self.store, self.egress, self.sequence = store, egress, 0
         self.key_fd = None
 
@@ -125,10 +131,11 @@ class ProtectedAmpService(AmpRuntimeProbe):
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() \
                 or stat.S_IMODE(info.st_mode) != 0o400 or info.st_nlink != 1 or not 1 <= info.st_size <= 4096:
             raise ValueError('Protected credential file rejected')
-        if self.operation == 'check':
+        if self.operation in ('check', 'smoke'):
             # Reserve before launching native code. Failure/crash consumes this
             # store's check; never remove or automatically reset this marker.
-            marker = os.open('check-used', os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+            marker = os.open('smoke-used' if self.operation == 'smoke' else 'check-used',
+                             os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
                              0o400, dir_fd=self.store.fd)
             os.fsync(marker); os.close(marker); os.fsync(self.store.fd)
         return mounts + ['--ro-bind', f'/proc/self/fd/{fd}', '/service-private/amp-key']
@@ -137,6 +144,10 @@ class ProtectedAmpService(AmpRuntimeProbe):
         return (self.key_fd,)
 
     def command(self):
+        if self.operation == 'smoke':
+            return ['/opt/amp', '-x', PROMPT, '--stream-json', '--settings-file', '/tmp/amp-settings.json',
+                    '--no-ide', '--no-notifications', '--mode', 'openai/gpt-6-astra',
+                    '--features', 'fast', '--visibility', 'private']
         if self.operation == 'check':
             return ['/opt/amp','threads','list','--limit','1','--json',
                     '--settings-file','/tmp/amp-settings.json']
@@ -145,7 +156,28 @@ class ProtectedAmpService(AmpRuntimeProbe):
     def source(self):
         # Reuse only the bounded CONNECT relay, not the Codex RPC runner.
         bridge = Path(__file__).with_name('login_bridge.py').read_text()
-        return (bridge + '\n' + inspect.getsource(check_output) + f'''
+        execution = f'''
+    try:
+        with tempfile.TemporaryFile() as output:
+            result=subprocess.run({self.command()!r},env=env,stdin=subprocess.DEVNULL,
+                stdout=output,stderr=subprocess.DEVNULL,timeout=8,close_fds=True)
+            if {self.operation == 'check'!r}:
+                output.seek(0)
+                state=check_output(result.returncode,output.read(65537))
+            else:
+                state='runtime_ready' if result.returncode==0 else 'runtime_failed'
+    except subprocess.TimeoutExpired:
+        state='timeout'
+    emit({{'op':'probe_result','state':state}})
+'''
+        classifier = ''
+        if self.operation == 'smoke':
+            classifier = Path(__file__).with_name('amp_smoke.py').read_text()
+            execution = f'''
+    result=run_smoke({self.command()!r},env,lambda value: emit({{'op':'smoke_progress','result':value}}))
+    emit({{'op':'smoke_result','result':result}})
+'''
+        return (bridge + '\n' + inspect.getsource(check_output) + '\n' + classifier + f'''
 from pathlib import Path
 import tempfile
 os.umask(0o077)
@@ -171,30 +203,30 @@ with Server(('127.0.0.1',0),Proxy) as server:
     key=Path('/service-private/amp-key').read_text()
     if not 1<=len(key)<=4096 or any(not 33<=ord(c)<=126 for c in key): raise ValueError()
     env.update(AMP_API_KEY=key,AMP_URL='https://ampcode.com',NODE_EXTRA_CA_CERTS='/opt/public-ca.pem')
-    try:
-        with tempfile.TemporaryFile() as output:
-            result=subprocess.run({self.command()!r},env=env,stdin=subprocess.DEVNULL,
-                stdout=output,stderr=subprocess.DEVNULL,timeout=8,close_fds=True)
-            if {self.operation == 'check'!r}:
-                output.seek(0)
-                state=check_output(result.returncode,output.read(65537))
-            else:
-                state='runtime_ready' if result.returncode==0 else 'runtime_failed'
-    except subprocess.TimeoutExpired:
-        state='timeout'
-    emit({{'op':'probe_result','state':state}})
-''').encode()
+''' + execution).encode()
 
     def decide(self, *_):
         raise ValueError('Protected preparation service cannot serve actors')
 
     def probe(self):
-        result = {'state': 'boundary_failed', 'authenticated': None}
-        deadline = time.monotonic() + 12
+        smoke = self.operation == 'smoke'
+        result = initial_result() if smoke else {'state': 'boundary_failed', 'authenticated': None}
+        result['state'] = 'boundary_failed'
+        deadline = time.monotonic() + (32 if smoke else 12)
         try:
             while True:
                 message = self.read(deadline)
+                if smoke and set(message) == {'op', 'result'} and message['op'] in ('smoke_progress', 'smoke_result'):
+                    value = safe_result(message['result'])
+                    if (value['state'] == 'in_progress') != (message['op'] == 'smoke_progress'):
+                        raise ValueError()
+                    result = dict(value)
+                    if message['op'] == 'smoke_result':
+                        break
+                    result['state'] = 'boundary_failed'
+                    continue
                 if set(message) == {'op', 'state'} and message['op'] == 'probe_result' \
+                        and not smoke \
                         and message['state'] in (('authenticated','application_response_invalid','native_failed','timeout')
                             if self.operation == 'check' else ('runtime_ready', 'runtime_failed', 'timeout')):
                     result['state'] = message['state']
@@ -205,11 +237,16 @@ with Server(('127.0.0.1',0),Proxy) as server:
                         or message['id'] != self.sequence + 1:
                     raise ValueError()
                 self.sequence += 1
-                response = self.egress.exchange(message['request'])
+                try:
+                    response = self.egress.exchange(message['request'])
+                except (ValueError, OSError):
+                    if smoke:
+                        result['state'] = 'egress_failed'
+                    raise
                 self.write({'op':'egress','id':message['id'],'response':response}, deadline)
         except KeyboardInterrupt:
             result['state'] = 'interrupted'
-        except (ValueError, OSError):
+        except (ValueError, OSError, TypeError, RecursionError):
             pass
         finally:
             self.log.append('probe_result', result)
@@ -225,6 +262,12 @@ with Server(('127.0.0.1',0),Proxy) as server:
 def verify(output, anchor):
     result = verify_chain(output, anchor)
     outcome = result['outcome']
+    if 'stage' in outcome:
+        safe_result(outcome)
+        if outcome['state'] == 'in_progress':
+            raise ValueError('Unfinished smoke evidence')
+        result['scope'] = 'host-recorded compatibility only; no task action or provider attestation'
+        return result
     if set(outcome) != {'state', 'authenticated'} \
             or type(outcome['state']) is not str or outcome['state'] not in PROBE_STATES:
         raise ValueError('Not protected Amp preparation evidence')
@@ -236,14 +279,17 @@ def verify(output, anchor):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=('init-store','import-key','probe','verify','check'))
+    parser.add_argument('operation', choices=('init-store','import-key','probe','verify','check','smoke'))
     parser.add_argument('--store', type=Path)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--anchor', type=Path)
     parser.add_argument('--enable-check-egress', action='store_true')
+    parser.add_argument('--enable-smoke-egress', action='store_true')
     args = parser.parse_args()
     if args.enable_check_egress != (args.operation == 'check'):
         parser.error('Only check requires --enable-check-egress')
+    if args.enable_smoke_egress != (args.operation == 'smoke'):
+        parser.error('Only smoke requires --enable-smoke-egress')
     if args.operation == 'verify':
         if args.output is None or args.anchor is None: parser.error('output and anchor required')
         print(canonical(verify(args.output, args.anchor))); return 0
@@ -268,9 +314,10 @@ def main():
             parser.error('anchor must be outside credential and audit directories')
         with anchor.open('x') as external:
             os.chmod(anchor,0o600)
-            egress = AmpEgress(timeout=15,single_connection=True) if args.operation == 'check' else None
+            egress = (AmpEgress(timeout=32) if args.operation == 'smoke' else
+                      AmpEgress(timeout=15,single_connection=True) if args.operation == 'check' else None)
             try:
-                with ProtectedAmpService(args.output,store,'check' if egress else '--version',egress=egress) as service:
+                with ProtectedAmpService(args.output,store,args.operation if egress else '--version',egress=egress) as service:
                     result=service.probe()
             finally:
                 if egress is not None: egress.close()
@@ -278,7 +325,7 @@ def main():
             external.flush();os.fsync(external.fileno())
         os.chmod(anchor,0o400)
         print(canonical(result))
-        return 0 if result['state'] in ('runtime_ready','authenticated') else 1
+        return 0 if result['state'] in ('runtime_ready','authenticated','compatible') else 1
 
 
 if __name__ == '__main__':

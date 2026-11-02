@@ -1,7 +1,8 @@
 # Offline Amp execute profile
 
-This is a **mock adapter and isolated native runtime probe**, not a live-ready
-Amp integration. No Amp model invocation has been performed. A separately
+The research adapter is a **mock adapter and isolated native runtime probe**, not
+a live-ready research integration. A separate, explicitly gated one-shot smoke
+operation is described below; its private live evidence is not published here. A separately
 authorized protected read-only authentication check succeeded; this offline
 adapter does not import or access that credential store. The owner explicitly
 requested CLI execute mode instead of
@@ -71,8 +72,8 @@ fixtures now distinguish authentication discovery, rejected account requests,
 and stalled transport; see Native tool discovery below. Native execution remains
 blocked: a tool listing is not evidence of effective execution restrictions.
 
-Validation: `python -m unittest discover -s tests -v` passed 112 tests,
-including the eleven-case native execution startup matrix;
+Validation: `python -m unittest discover -s tests -v` passed 116 tests,
+including the native startup and fixed-smoke offline matrices;
 `python -m synthetic_harness validate` passed 2,160 seeded controls with zero
 failures. Targeted adapter tests cover six completion/escalation episodes across
 the three domains, stale echoes and session changes, nonzero exits after a valid
@@ -468,7 +469,7 @@ sanitized result. A missing/invalid anchor is not successful authentication.
 
 ## Remaining gate before model use
 
-Live construction without explicit scripted answers is disabled. No worker-pool
+Live research construction without explicit scripted answers is disabled. No worker-pool
 integration for this Amp profile or authenticated throughput claim is made.
 The protected handoff, relay and native non-model TLS path are validated offline;
 real account provisioning, successful authenticated responses, stream schema, actual
@@ -483,3 +484,85 @@ minimal live compatibility smoke test. Do not treat a functioning host Amp
 installation as permission to extract its credentials or as proof that this
 isolated profile can authenticate. User-provided sponsored deployment permission
 is authorization context, not independently verified provider terms.
+
+## Fixed one-shot compatibility operation
+
+This optional operation uses a different, explicit trust assumption from the
+extension-exclusion investigation above: pinned Amp and all extensions/inherited
+configuration it actually loads are trusted credential-bearing infrastructure.
+That is **not evidence of extension absence or tool suppression**. Model output
+remains untrusted. Neither the research actor nor the task executor is invoked.
+Existing offline research APIs remain mock-only.
+
+`amp_protected smoke --enable-smoke-egress` runs one fixed command with one public
+synthetic inventory observation, closed stdin, Astra and Fast requested, private
+visibility, default/unverified effort, JSON streaming, and no IDE integration.
+It accepts only the fixed `check` proposal with empty arguments and never applies
+it. This is a transport/format compatibility canary, not a benchmark of decisions.
+Callers cannot supply a prompt, command, model, destination or task action.
+
+The operation requires an explicit operator-provisioned store and fresh output
+and external-anchor paths. `home/smoke-used` is exclusively created and fsynced
+before spawning the service; success, failure and interruption consume it.
+Existing `check-used` authentication markers are neither reused nor reset. Each
+invocation requires explicit human authorization; do not delete markers, copy
+keys into new stores, or automatically retry to get another attempt.
+
+The native child has a 30-second wall deadline and closed stdin. Stdout is read
+incrementally, capped at 256 KiB total and 64 KiB per JSON event (excluding its
+newline). A single five-second budget covers whole-service cgroup cleanup.
+The parent has a 32-second protocol watchdog to cover service startup/reporting.
+Existing namespace, syscall, CPU, memory, process, file and tmpfs limits are
+unchanged. Egress remains the existing bounded ampcode.com:443-only relay,
+including its socket limits and the service's 256-frame/2-MiB wire budget.
+No additional destination or routing override exists in production.
+
+The classifier requires init, exact public prompt echo, one bounded proposal,
+matching successful result, EOF and native exit zero. It accepts nonempty trusted
+init catalogs and records only counts, never private tool/server names. Observed
+tool, approval, permission-denial or subagent activity makes the compatibility
+test unsuccessful; this is observation **after possible side effects**, not a
+preventive tool control. Schema drift, duplicate keys, truncation, extra events,
+oversize output, native failure and timeouts fail closed. A valid proposal before
+a later failure is not a successful run. Unknown fields are not guessed into a
+successful schema, and private error strings are never used as diagnoses.
+
+Only an allowlisted result leaves the namespace: state, stream stage, validated
+session ID, event/catalog counts, proposal-validation boolean, requested settings,
+whether reported mode matches, bounded reported usage/duration/turn count, native
+exit and local elapsed/output counts. Effective model/effort/Fast and native retry
+count remain null: the documented stream does not independently attest them.
+Raw stream bytes are transient; stderr is discarded. Authoritative logs omit
+wire payloads and raw metadata; `verify` checks the external host anchor, not
+provider attestation. `egress_failed` identifies relay rejection, not an inferred
+TLS/provider cause. Other failures record the last reached stream stage.
+On a host-boundary failure, elapsed/output/event counters are the last received
+child snapshot, not a complete wall-time or remote-activity measurement.
+
+Execute mode normally creates a private automatically archived conversation and
+incurs usage. One CLI invocation does not promise one provider request, one
+model call, a dollar cap, or remote cancellation when the local process stops:
+native retries, supporting models and trusted extensions may add work. No account
+configuration is changed by this operation. A successful result would not establish
+session continuation, research validity, effective tool suppression or suitability
+for unattended/concurrent experiments.
+
+Offline validation in `tests/test_amp_smoke.py` covers success with nonempty init
+metadata, exact/over-limit output, secret-bearing malformed/truncated data,
+tool/approval/late events, late nonzero exit, native error, forged supervisor
+envelopes, interruption, the real 30-second timeout, one-shot markers, sanitized
+anchors and cleanup. A pinned native CLI case uses only a rejecting local TLS
+fixture and synthetic key; it establishes bounded startup failure, not successful
+live model transport. Fixture command/CA/routing substitutions are test-only.
+
+After explicit authorization, with distinct existing private parent directories:
+
+```sh
+python -m synthetic_harness.amp_protected smoke --enable-smoke-egress \
+  --store /private/provisioned-store --output /audit/fresh-smoke --anchor /anchors/fresh-smoke-root
+python -m synthetic_harness.amp_protected verify \
+  --output /audit/fresh-smoke --anchor /anchors/fresh-smoke-root
+```
+
+Keep live results, thread IDs, account inventory and credential paths private;
+never commit them with generic source/tests/docs.

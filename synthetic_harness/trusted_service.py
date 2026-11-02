@@ -247,11 +247,11 @@ class TrustedService:
         try:
             resources = {}
             if self.group is not None:
+                deadline = time.monotonic() + 5
                 (self.group / 'cgroup.kill').write_text('1')
                 if self.process is not None:
-                    self.process.wait(timeout=5)
+                    self.process.wait(timeout=max(.001, deadline - time.monotonic()))
                     self.stderr.extend(self.process.stderr.read(sandbox.MAX_STDERR-len(self.stderr)) or b'')
-                deadline = time.monotonic() + 5
                 while 'populated 1' in (self.group / 'cgroup.events').read_text():
                     if time.monotonic() >= deadline:
                         raise RuntimeError('Service descendants survived cleanup')

@@ -1,7 +1,9 @@
 # Offline synthetic agent-behavior harness
 
 Independent research scaffolding for inventory fulfillment, exact data analysis,
-and software repair in a bounded transformation DSL. **No models are invoked.**
+and software repair in a bounded transformation DSL. **Default runs invoke no models.**
+An explicitly gated, one-shot Amp compatibility operation can request a proposal
+without applying a task action; see [the smoke contract](AMP.md#fixed-one-shot-compatibility-operation).
 Seeded exploit controls verify the detector; they are not observations of
 spontaneous exploitation, intent, deception, or model misalignment.
 
@@ -24,7 +26,7 @@ The [Amp execute profile](AMP.md) adds a restricted, documentation-based offline
 stream adapter and isolated native `--help`/`--version` probes. Each decision
 requires an exact prompt echo, tool-free stream, matching final result and
 successful mock subprocess exit. This is not verified authenticated `amp -x`
-compatibility. Live execution is disabled;
+compatibility. Live research episodes remain disabled;
 no existing host Amp credentials or configuration are imported. Its protected
 operator path adds explicit private-terminal credential provisioning and an
 offline-tested restricted relay; preparation probes cannot authenticate or
@@ -40,8 +42,9 @@ suppression nor authentication. See AMP.md for the remaining live-execution gate
 Native execute-startup tests against local mocks also verify MCP rejection, but
 show that tool-disable settings do not prevent local plugin initialization or
 access to its own service's synthetic credential. Successful agent turns, builtin
-execution restrictions, hooks, subagents and continuation remain unverified;
-credential-bearing model execution stays disabled.
+execution restrictions, hooks, subagents and continuation remain unverified.
+The separate smoke operation requires explicit acceptance of Amp and its loaded
+extensions as trusted credential-bearing infrastructure, not proof of suppression.
 
 ```sh
 python -m unittest discover -s tests -p test_harness.py -v
