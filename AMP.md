@@ -566,9 +566,10 @@ Smoke execution drains stdout and stderr concurrently under the existing
 30-second native / 32-second host deadlines and shared five-second cleanup
 allowance. Stdout/event, service-envelope/wire, egress and resource limits are
 unchanged. Stderr now has an additional 64-KiB cap; the 65,537th byte stops the
-test with `native_stderr_limit`. Raw stderr is never persisted, forwarded to the
-host, hashed into evidence or included in exceptions. Non-smoke operations keep
-their previous stderr-discarding behavior.
+test with `native_stderr_limit`. By default raw stderr is never persisted,
+forwarded to the host, hashed into evidence or included in exceptions. The
+explicit operator preview below is the sole bounded forwarding exception.
+Non-smoke operations keep their previous stderr-discarding behavior.
 
 The optional `native_diagnostic` result contains only an allowlisted category,
 bounded byte count and EOF/completeness boolean. Classification requires an exact
@@ -606,6 +607,49 @@ limits, sanitization, external anchors and cleanup. Old outcomes lacking these
 optional fields remain verifiable without rewriting evidence. Earlier discarded
 stderr cannot be recovered or retrospectively classified. Diagnostics add no
 live retry authorization and do not establish a relationship to remote records.
+
+### Opt-in operator stderr preview
+
+`smoke --operator-stderr-view` routes at most the first 2,048 stderr bytes to a
+human terminal, not ordinary stdout or evidence. This is **human-only routing,
+not confidentiality against privileged host processes or terminal recorders**.
+It requires unredirected stdin/stdout/stderr on the same foreground controlling
+TTY, `TERM=xterm` or `xterm-256color`, and no detected tmux/screen environment.
+The shared Amp Terminal is tmux-backed and is unsupported. Do not unset
+multiplexer variables to bypass this check. No suitable private human terminal
+has been provisioned by this implementation.
+
+For a separately authorized smoke attempt, the human adds
+`--operator-stderr-view` to the existing protected smoke command, retaining its
+fresh `--smoke-authorization`, private store, output and external anchor paths.
+Before credential-store access or egress resolution, a warning requires typing
+`PRIVATE` and Enter within 60 seconds. Declining starts no operation. This flag
+does not grant live-attempt authorization, reset markers or recover old stderr.
+
+The namespace sends one bounded transient hex envelope to the trusted host;
+it counts against existing envelope/wire limits. Receive payloads remain absent
+from the protected journal, including their hex representation. The native
+client receives no host TTY descriptor or additional mount. The host displays
+the preview only after service/egress cleanup and audit-anchor sealing. All
+control/non-ASCII bytes and backslashes are rendered as literal `\xNN` text,
+wrapped at 76 columns, inside a fixed alternate-screen display. Enter, Ctrl-C
+or a 60-second timeout clears that screen and restores terminal settings.
+Display and confirmation waits are outside the unchanged native/host deadlines
+and shared cleanup allowance. Overflow retains only the bounded prefix;
+sanitized diagnostics still report stream completeness and the original limit.
+
+Use only an unshared, unrecorded Linux terminal on a host with the existing
+sandbox prerequisites. Alternate-screen clearing cannot guarantee deletion
+from emulator/browser scrollback, recording, session logging, swap or privileged
+memory inspection; bytearray wiping is best effort, not secure erasure. The
+operator must not copy private output into chat, logs, screenshots or public
+artifacts. Unsupported terminals fail closed rather than falling back to stdout.
+
+`tests/test_operator_view.py` uses disposable synthetic PTYs and synthetic keys,
+never a human terminal pane. It covers declined opt-in, no-TTY/multiplexer
+refusal, malformed/duplicate/oversized previews, escaped hostile controls,
+stderr overflow, Enter/cancellation/real timeout clearing, restored terminal
+settings, cleanup-before-display, journal non-leakage and anchor tampering.
 
 ### Offline relay-budget diagnosis
 

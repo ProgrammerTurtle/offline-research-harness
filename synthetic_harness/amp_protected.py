@@ -15,6 +15,7 @@ from .amp_execute import AmpRuntimeProbe, SETTINGS, AMP_SHA256
 from .amp_smoke import PROMPT, initial_result, safe_result
 from .auth_egress import AuthEgress, resolve_auth
 from .login import CredentialStore, verify as verify_chain
+from .operator_view import OperatorStderrView
 from .runner import EventLog
 from .tasks import canonical
 from .trusted_service import TrustedService, ServiceBoundaryError
@@ -106,9 +107,13 @@ class ProtectedLog(EventLog):
 class ProtectedAmpService(AmpRuntimeProbe):
     log_type = ProtectedLog
 
-    def __init__(self, output, store, operation='--version', *, egress=None, smoke_authorization=None):
+    def __init__(self, output, store, operation='--version', *, egress=None, smoke_authorization=None, operator_view=None):
         super().__init__(output, '--version' if operation in ('check', 'smoke') else operation)
         self.operation = operation
+        if operator_view is not None and (operation != 'smoke' or type(operator_view) is not OperatorStderrView
+                                          or operator_view.fd is None):
+            raise ValueError('Confirmed operator terminal required')
+        self.operator_view = operator_view
         if smoke_authorization is not None and (operation != 'smoke' or type(smoke_authorization) is not str
                 or re.fullmatch('[0-9a-f]{32}', smoke_authorization) is None):
             raise ValueError('Expected explicit smoke-only authorization identifier')
@@ -178,8 +183,10 @@ class ProtectedAmpService(AmpRuntimeProbe):
         classifier = ''
         if self.operation == 'smoke':
             classifier = Path(__file__).with_name('amp_smoke.py').read_text()
+            display = "lambda data, truncated: emit({'op':'operator_display','hex':data,'truncated':truncated})" \
+                if self.operator_view is not None else 'None'
             execution = f'''
-    result=run_smoke({self.command()!r},env,lambda value: emit({{'op':'smoke_progress','result':value}}))
+    result=run_smoke({self.command()!r},env,lambda value: emit({{'op':'smoke_progress','result':value}}),{display})
     emit({{'op':'smoke_result','result':result}})
 '''
         return (bridge + '\n' + inspect.getsource(check_output) + '\n' + classifier + f'''
@@ -223,6 +230,10 @@ with Server(('127.0.0.1',0),Proxy) as server:
         try:
             while True:
                 message = self.read(deadline)
+                if smoke and self.operator_view is not None and set(message) == {'op','hex','truncated'} \
+                        and message['op'] == 'operator_display':
+                    self.operator_view.capture(message['hex'], message['truncated'])
+                    continue
                 if smoke and set(message) == {'op', 'result'} and message['op'] in ('smoke_progress', 'smoke_result'):
                     value = safe_result(message['result'])
                     if (value['state'] == 'in_progress') != (message['op'] == 'smoke_progress'):
@@ -307,6 +318,7 @@ def main():
     parser.add_argument('--enable-check-egress', action='store_true')
     parser.add_argument('--enable-smoke-egress', action='store_true')
     parser.add_argument('--smoke-authorization', help='Explicitly approved one-shot identifier: 32 lowercase hex digits')
+    parser.add_argument('--operator-stderr-view', action='store_true', help='Human-only foreground TTY preview after cleanup; refuses known multiplexers')
     args = parser.parse_args()
     if args.enable_check_egress != (args.operation == 'check'):
         parser.error('Only check requires --enable-check-egress')
@@ -315,6 +327,14 @@ def main():
     if args.smoke_authorization is not None and (args.operation != 'smoke' or
             re.fullmatch('[0-9a-f]{32}', args.smoke_authorization) is None):
         parser.error('Authorization identifier requires smoke and 32 lowercase hex digits')
+    if args.operator_stderr_view:
+        if args.operation != 'smoke': parser.error('Private view is smoke-only')
+        with OperatorStderrView() as view:
+            return execute_operation(args, parser, view)
+    return execute_operation(args, parser)
+
+
+def execute_operation(args, parser, operator_view=None):
     if args.operation == 'verify':
         if args.output is None or args.anchor is None: parser.error('output and anchor required')
         print(canonical(verify(args.output, args.anchor))); return 0
@@ -343,13 +363,15 @@ def main():
                       AmpEgress(timeout=15,single_connection=True) if args.operation == 'check' else None)
             try:
                 with ProtectedAmpService(args.output,store,args.operation if egress else '--version',egress=egress,
-                                         smoke_authorization=args.smoke_authorization) as service:
+                                         smoke_authorization=args.smoke_authorization,operator_view=operator_view) as service:
                     result=service.probe()
             finally:
                 if egress is not None: egress.close()
             external.write(canonical({'root':service.receipt['root']})+'\n')
             external.flush();os.fsync(external.fileno())
         os.chmod(anchor,0o400)
+        if operator_view is not None:
+            operator_view.show()
         print(canonical(result))
         return 0 if result['state'] in ('runtime_ready','authenticated','compatible') else 1
 

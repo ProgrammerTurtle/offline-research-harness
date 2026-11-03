@@ -46,7 +46,7 @@ class NativeDiagnostic:
     def feed(self, data):
         self.total += len(data)
         if self.total > 65536:
-            self.data.clear()
+            del self.data[2048:]  # Bounded prefix for explicitly opted-in human viewing.
             return False
         self.data.extend(data)
         return True
@@ -259,12 +259,17 @@ class SmokeStream:
             return False
 
 
-def run_smoke(command, env, progress):
+def run_smoke(command, env, progress, operator_display=None):
     stream = SmokeStream()
     diagnostic = NativeDiagnostic()
     def snapshot():
         stream.result['native_diagnostic'] = diagnostic.result()
         return safe_result(stream.result)
+    def finish():
+        value = snapshot()
+        if operator_display is not None:
+            operator_display(bytes(diagnostic.data[:2048]).hex(), diagnostic.total > 2048)
+        return value
     started = time.monotonic()
     deadline = started + 30
     pending = bytearray()
@@ -285,7 +290,7 @@ def run_smoke(command, env, progress):
                               if r['stage'] == 'awaiting_exit' and not pending else 'schema_rejected')
                 if r['state'] == 'compatible' and diagnostic.total:
                     r['state'] = 'native_diagnostic_error'
-                return snapshot()
+                return finish()
             time.sleep(.01)
             continue
         pipes = ([] if eof else [child.stdout]) + ([] if diagnostic.complete else [child.stderr])
@@ -298,7 +303,7 @@ def run_smoke(command, env, progress):
                 diagnostic.complete = True
             elif not diagnostic.feed(data):
                 r['state'] = 'native_stderr_limit'
-                return snapshot()
+                return finish()
         if child.stdout not in ready:
             continue
         data = os.read(child.stdout.fileno(), min(4096, 262145 - r['stdout_bytes']))
@@ -308,21 +313,21 @@ def run_smoke(command, env, progress):
         r['stdout_bytes'] += len(data)
         if r['stdout_bytes'] > 262144:
             r['state'] = 'output_limit'
-            return snapshot()
+            return finish()
         pending.extend(data)
         while b'\n' in pending:
             line, _, rest = pending.partition(b'\n')
             pending = bytearray(rest)
             if len(line) > 65536:
                 r['state'] = 'output_limit'
-                return snapshot()
+                return finish()
             if not stream.accept(line):
-                return snapshot()
+                return finish()
             progress(snapshot())
         if len(pending) > 65536:
             r['state'] = 'output_limit'
-            return snapshot()
+            return finish()
     stream.result.update(state='timeout', elapsed_ms=30000)
     # Parent receives the result and kills the entire service cgroup, including
     # this child and descendants. No retry or separate child cleanup allowance.
-    return snapshot()
+    return finish()
